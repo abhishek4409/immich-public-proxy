@@ -167,6 +167,74 @@ function recordAndRefresh (content: any) { // eslint-disable-line @typescript-es
   }
 }
 
+// Height of the strip along the bottom of a video where the browser draws its
+// native controls (seek bar, time, play / mute / fullscreen). Generous enough
+// to cover iOS Safari's inline control bar, Chrome's control panel, and a
+// finger landing a little off the seek bar.
+const VIDEO_CONTROLS_ZONE_PX = 80
+// Never claim more than this share of a short (e.g. landscape-phone) video, so
+// most of the slide still swipes.
+const VIDEO_CONTROLS_ZONE_MAX_SHARE = 0.4
+
+/** Vertical viewport position of the pointer / touch that started a gesture. */
+function gestureStartY (e: PointerEvent | MouseEvent | TouchEvent): number | undefined {
+  if ('changedTouches' in e) return e.changedTouches[0]?.clientY
+  return e.clientY
+}
+
+/** True when `y` falls inside the controls strip along a box's bottom edge. */
+function inBottomStrip (y: number, bottom: number, height: number): boolean {
+  const zone = Math.min(VIDEO_CONTROLS_ZONE_PX, height * VIDEO_CONTROLS_ZONE_MAX_SHARE)
+  return y >= bottom - zone && y <= bottom
+}
+
+/**
+ * Whether a gesture starting at viewport `y` on `video` lands where its native
+ * controls are drawn. Browsers draw the control bar along the bottom of the
+ * element box, which here fills the whole slide; the video itself is
+ * letterboxed inside it (`object-fit: contain`). We also cover the bottom of
+ * the visible picture, so the guard holds even if a browser anchors the
+ * controls to the picture rather than the box. The picture's size is only
+ * known once metadata loads; until then the poster fills the box anyway.
+ */
+function inVideoControlsZone (video: HTMLVideoElement, y: number): boolean {
+  const box = video.getBoundingClientRect()
+  if (inBottomStrip(y, box.bottom, box.height)) return true
+  if (!video.videoWidth || !video.videoHeight) return false
+  const scale = Math.min(box.width / video.videoWidth, box.height / video.videoHeight)
+  const pictureHeight = video.videoHeight * scale
+  const pictureBottom = box.top + (box.height + pictureHeight) / 2
+  return inBottomStrip(y, pictureBottom, pictureHeight)
+}
+
+/**
+ * Stop PhotoSwipe treating a drag on a video's native controls as a swipe.
+ *
+ * The `<video>` takes pointer events (see `.pswp__video-wrap video` in
+ * photoswipe-overrides.css) so its controls work, but those events still
+ * bubble to PhotoSwipe's listener on the scroll wrap. Dragging the seek bar
+ * sideways therefore also dragged the slide, and far enough flipped to the
+ * neighbouring item; a vertical drag could close the lightbox. Mostly seen on
+ * iOS Safari, where the seek bar is scrubbed with a finger.
+ *
+ * Cancelling PhotoSwipe's `pointerDown` event makes it skip the gesture
+ * entirely: it never tracks the pointer, so no drag, swipe, vertical-drag
+ * close or tap (UI toggle) follows. The native event is left alone, so the
+ * browser's controls still get it. Only gestures that start in the controls
+ * strip are affected; swiping elsewhere on a video still changes slides.
+ */
+function registerVideoControlsGuard (lightbox: { on: (ev: string, cb: (e: any) => void) => void }) { // eslint-disable-line @typescript-eslint/no-explicit-any
+  lightbox.on('pointerDown', (e: { originalEvent: PointerEvent | MouseEvent | TouchEvent, preventDefault: () => void }) => {
+    const target = e.originalEvent.target
+    // Native controls live in the video's shadow tree, so their events are
+    // retargeted to the <video> element itself.
+    if (!(target instanceof HTMLVideoElement) || !target.controls) return
+    if (!target.closest('.pswp__video-wrap')) return // not one of our video slides
+    const y = gestureStartY(e.originalEvent)
+    if (y !== undefined && inVideoControlsZone(target, y)) e.preventDefault()
+  })
+}
+
 /**
  * Construct the PhotoSwipe lightbox, register its UI elements, set up hash
  * navigation, and call `init()`. Reads config from `state.lightboxConfig`
@@ -236,6 +304,7 @@ export function initLightbox () {
   })
 
   registerZoomUpgrade(state.lightbox)
+  registerVideoControlsGuard(state.lightbox)
   registerBackButton(state.lightbox)
   if (state.lightboxConfig.showDownload) registerDownloadButton(state.lightbox)
   registerFullscreenButton(state.lightbox)
